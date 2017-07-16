@@ -16,6 +16,7 @@ import math
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
+import re
 
 use_cuda = torch.cuda.is_available()
 
@@ -181,17 +182,22 @@ def train(input_variable, target_variable, encoder, decoder, context, context_hi
             decoder_input = Variable(torch.LongTensor([[ni]]))
             decoder_input = decoder_input.cuda() if use_cuda else decoder_input
 
-            loss += criterion(decoder_output[0], target_variable[di])
+            # only calculate loss if its the last turn
+            if last:
+                loss += criterion(decoder_output[0], target_variable[di])
             if ni == EOS_token:
                 break
 
-    rv = not last
-    loss.backward(retain_variables=rv)
+    if last:
+        loss.backward()
 
     #encoder_optimizer.step()
     #decoder_optimizer.step()
 
-    return loss.data[0] / target_length, context_hidden
+    if last:
+        return loss.data[0] / target_length, context_hidden
+    else:
+        return context_hidden
 
 def asMinutes(s):
     m = math.floor(s / 60)
@@ -241,7 +247,7 @@ def variablesFromGroup(group):
 
 # training should proceed over each set of dialogs
 # which should be in variable groups = [u1,u2,u3...un]
-def trainIters(encoder, decoder, context,print_every=500, plot_every=100, learning_rate=0.0001):
+def trainIters(encoder, decoder, context,print_every=500, plot_every=100, evaluate_every=500, learning_rate=0.0001):
     global groups
     start = time.time()
     plot_losses = []
@@ -274,13 +280,17 @@ def trainIters(encoder, decoder, context,print_every=500, plot_every=100, learni
             if i + 1 == len(training_group) - 1:
                 last = True
 
-            loss,context_hidden = train(input_variable, target_variable, encoder,
+            if last:
+                loss,context_hidden = train(input_variable, target_variable, encoder,
                          decoder, context, context_hidden, encoder_optimizer, decoder_optimizer, criterion, last)
-            print_loss_total += loss
-            plot_loss_total += loss
-            encoder_optimizer.step()
-            decoder_optimizer.step()
-            context_optimizer.step()
+                print_loss_total += loss
+                plot_loss_total += loss
+                encoder_optimizer.step()
+                decoder_optimizer.step()
+                context_optimizer.step()
+            else:
+                context_hidden = train(input_variable, target_variable, encoder,
+                         decoder, context, context_hidden, encoder_optimizer, decoder_optimizer, criterion, last)
 
         if iter % print_every == 0:
             print_loss_avg = print_loss_total / print_every
@@ -290,62 +300,74 @@ def trainIters(encoder, decoder, context,print_every=500, plot_every=100, learni
         if iter % (print_every * 3) == 0:
             # save models
             print "saving models"
-            torch.save(encoder.state_dict(),'encoder.model')
-            torch.save(decoder.state_dict(),'decoder.model')
-            torch.save(context.state_dict(),'context.model')
+            torch.save(encoder.state_dict(),'encoder_3.model')
+            torch.save(decoder.state_dict(),'decoder_3.model')
+            torch.save(context.state_dict(),'context_3.model')
 
         if iter % plot_every == 0:
             plot_loss_avg = plot_loss_total / plot_every
             plot_losses.append(plot_loss_avg)
             plot_loss_total = 0
 
+        if iter % evaluate_every == 0:
+            evaluateRandomly(encoder,decoder,context)
+
     #showPlot(plot_losses)
 
 # TODO: evaluate with context
-def evaluate(encoder, decoder, sentence, max_length=MAX_LENGTH):
-    input_variable = variableFromSentence(indexes=sentence)
-    input_length = input_variable.size()[0]
-    encoder_hidden = encoder.initHidden()
-
-    encoder_outputs = Variable(torch.zeros(max_length, encoder.hidden_size))
-    encoder_outputs = encoder_outputs.cuda() if use_cuda else encoder_outputs
-
-    for ei in range(input_length):
-        encoder_output, encoder_hidden = encoder(input_variable[ei],
-                                                 encoder_hidden)
-        encoder_outputs[ei] = encoder_outputs[ei] + encoder_output[0][0]
-
-    decoder_input = Variable(torch.LongTensor([[SOS_token]]))  # SOS
-    decoder_input = decoder_input.cuda() if use_cuda else decoder_input
-
-    decoder_hidden = encoder_hidden
-
+def evaluate(encoder, decoder, context, sentences, max_length=MAX_LENGTH):
     decoded_words = []
     decoder_attentions = torch.zeros(max_length, max_length)
+    context_hidden = context.initHidden()
+    
+    for i,sentence in enumerate(sentences):
+        last = False
+        if i + 1 == len(sentences):
+            last = True
+        input_variable = variableFromSentence(sentence=sentence)
+        input_length = input_variable.size()[0]
+        encoder_hidden = encoder.initHidden()
 
-    for di in range(max_length):
-        decoder_output, decoder_hidden, decoder_attention = decoder(
-            decoder_input, decoder_hidden, encoder_output, encoder_outputs)
-        decoder_attentions[di] = decoder_attention.data
-        topv, topi = decoder_output.data.topk(1)
-        ni = topi[0][0]
-        if ni == EOS_token:
-            decoded_words.append('<eos>')
-            break
-        else:
-            decoded_words.append(id2word[ni])
+        encoder_outputs = Variable(torch.zeros(max_length, encoder.hidden_size))
+        encoder_outputs = encoder_outputs.cuda() if use_cuda else encoder_outputs
 
-        decoder_input = Variable(torch.LongTensor([[ni]]))
+        for ei in range(input_length):
+            encoder_output, encoder_hidden = encoder(input_variable[ei],
+                                                     encoder_hidden)
+            encoder_outputs[ei] = encoder_outputs[ei] + encoder_output[0][0]
+
+        decoder_input = Variable(torch.LongTensor([[SOS_token]]))  # SOS
         decoder_input = decoder_input.cuda() if use_cuda else decoder_input
+
+        decoder_hidden = encoder_hidden
+
+        # calculate context
+        context_output,context_hidden = context(encoder_output,context_hidden)
+
+        for di in range(max_length):
+            decoder_output, decoder_hidden, decoder_attention = decoder(
+                decoder_input, decoder_hidden, encoder_output, encoder_outputs, context_hidden)
+            decoder_attentions[di] = decoder_attention.data
+            topv, topi = decoder_output.data.topk(1)
+            ni = topi[0][0]
+            if last:
+                if ni == EOS_token:
+                    decoded_words.append('<eos>')
+                    break
+                else:
+                    decoded_words.append(id2word[ni])
+
+            decoder_input = Variable(torch.LongTensor([[ni]]))
+            decoder_input = decoder_input.cuda() if use_cuda else decoder_input
 
     return decoded_words, decoder_attentions[:di + 1]
 
-def evaluateRandomly(encoder, decoder, n=10):
+def evaluateRandomly(encoder, decoder, context, n=10):
     for i in range(n):
-        pair = random.choice(pairs)
-        print('>', ' '.join([id2word[p] for p in pair[0]]))
-        print('=', ' '.join([id2word[p] for p in pair[1]]))
-        output_words, attentions = evaluate(encoder, decoder, pair[0])
+        group = random.choice(groups)
+        for gr in group:
+            print('>', gr)
+        output_words, attentions = evaluate(encoder, decoder, context, group[:-1])
         output_sentence = ' '.join(output_words)
         print('<', output_sentence)
         print('')
@@ -356,7 +378,8 @@ if __name__=='__main__':
     groups = []
     with open(sys.argv[1],'r') as fp:
         for line in fp:
-            groups.append([p.strip() for p in line.replace('\n','').split('</s>') if len(p.strip()) > 0])
+            groups.append([re.sub('<[^>]+>', '',p.strip()).lstrip() 
+                for p in line.replace('\n','').split('</s>') if len(p.strip()) > 0])
     dt = pkl.load(open(sys.argv[2],'r'))
     word2id = {d[0]:d[1] for d in dt}
     id2word = {d[1]:d[0] for d in dt}
@@ -373,7 +396,7 @@ if __name__=='__main__':
         attn_decoder1 = attn_decoder1.cuda()
         context1 = context1.cuda()
 
-    trainIters(encoder1, attn_decoder1, context1, print_every=100)
+    trainIters(encoder1, attn_decoder1, context1, print_every=100, evaluate_every=600)
 
 
 
