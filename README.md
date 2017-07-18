@@ -7,7 +7,7 @@ Pytorch implementation of Hierarchical Encoder Decoder Sequence to Sequence Mode
 ## TODO
 
 - [ ] Add data utility
-- [ ] Implement Beam Search
+- [x] Implement Beam Search
 - [ ] Replace GRU with LSTM
 - [ ] Report on results
 

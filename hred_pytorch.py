@@ -27,7 +27,7 @@ EOS_token = None
 SOS_token = None
 
 # max sentence length
-MAX_LENGTH = 100
+MAX_LENGTH = 30
 
 class EncoderRNN(nn.Module):
     def __init__(self, input_size, hidden_size, n_layers=1):
@@ -172,6 +172,7 @@ def train(input_variable, target_variable, encoder, decoder, context, context_hi
             decoder_input = target_variable[di]  # Teacher forcing
 
     else:
+
         # Without teacher forcing: use its own predictions as the next input
         for di in range(target_length):
             decoder_output, decoder_hidden, decoder_attention = decoder(
@@ -229,6 +230,7 @@ def variableFromSentence(sentence=None,indexes=None):
     global word2id
     indexes = indexesFromSentence(word2id, sentence)
     indexes.append(EOS_token)
+    #print len(indexes)
     result = Variable(torch.LongTensor(indexes).view(-1, 1),requires_grad=False)
     if use_cuda:
         return result.cuda()
@@ -300,9 +302,9 @@ def trainIters(encoder, decoder, context,print_every=500, plot_every=100, evalua
         if iter % (print_every * 3) == 0:
             # save models
             print "saving models"
-            torch.save(encoder.state_dict(),'encoder_3.model')
-            torch.save(decoder.state_dict(),'decoder_3.model')
-            torch.save(context.state_dict(),'context_3.model')
+            torch.save(encoder.state_dict(),'encoder_4.model')
+            torch.save(decoder.state_dict(),'decoder_4.model')
+            torch.save(context.state_dict(),'context_4.model')
 
         if iter % plot_every == 0:
             plot_loss_avg = plot_loss_total / plot_every
@@ -315,7 +317,7 @@ def trainIters(encoder, decoder, context,print_every=500, plot_every=100, evalua
     #showPlot(plot_losses)
 
 # TODO: evaluate with context
-def evaluate(encoder, decoder, context, sentences, max_length=MAX_LENGTH):
+def evaluate(encoder, decoder, context, sentences, max_length=MAX_LENGTH, beam=7):
     decoded_words = []
     decoder_attentions = torch.zeros(max_length, max_length)
     context_hidden = context.initHidden()
@@ -344,30 +346,68 @@ def evaluate(encoder, decoder, context, sentences, max_length=MAX_LENGTH):
         # calculate context
         context_output,context_hidden = context(encoder_output,context_hidden)
 
+        def decode_with_beam(decoder_inputs,decoder_hiddens,beam):
+            new_decoder_inputs = []
+            new_decoder_hiddens = []
+            decoder_outputs = torch.FloatTensor().cuda() if use_cuda else torch.FloatTensor()
+            #decoder_outputs_h = torch.FloatTensor()
+            for i,decoder_input in enumerate(decoder_inputs):
+                decoder_output, decoder_hidden, decoder_attention = decoder(
+                    decoder_input, decoder_hiddens[i], encoder_output, encoder_outputs,context_hidden)
+                #print decoder_output.data
+                #print decoder_outputs
+                decoder_outputs = torch.cat((decoder_outputs,decoder_output.data),1)
+                #decoder_outputs_h = torch.cat((decoder_outputs_h,decoder_output[0]),1)
+                new_decoder_hiddens.append(decoder_hidden)
+
+            topv,topi = decoder_outputs.topk(beam)
+            nis = list(topi[0])
+            nh = [] # decoder_hidden
+            for ni in nis:
+                nip = ni % len(word2id.keys()) # get the word id
+                #if nip == EOS_token:
+                #    continue # or break?
+                decoder_input = Variable(torch.LongTensor([[nip]]))
+                decoder_input = decoder_input.cuda() if use_cuda else decoder_input
+                new_decoder_inputs.append(decoder_input)
+                nh.append(new_decoder_hiddens[int((ni / len(word2id.keys())))])
+            
+            return new_decoder_inputs, nh,(nis[0] % len(word2id.keys()))
+        
+        decoder_inputs = [decoder_input]
+        decoder_hiddens = [decoder_hidden]
         for di in range(max_length):
-            decoder_output, decoder_hidden, decoder_attention = decoder(
-                decoder_input, decoder_hidden, encoder_output, encoder_outputs, context_hidden)
-            decoder_attentions[di] = decoder_attention.data
-            topv, topi = decoder_output.data.topk(1)
-            ni = topi[0][0]
+            decoder_inputs,decoder_hiddens,ni = decode_with_beam(decoder_inputs,decoder_hiddens,beam)
             if last:
                 if ni == EOS_token:
                     decoded_words.append('<eos>')
                     break
                 else:
                     decoded_words.append(id2word[ni])
+        #
+        #    decoder_output, decoder_hidden, decoder_attention = decoder(
+        #        decoder_input, decoder_hidden, encoder_output, encoder_outputs, context_hidden)
+        #    decoder_attentions[di] = decoder_attention.data
+        #    topv, topi = decoder_output.data.topk(1)
+        #    ni = topi[0][0]
+        #    if last:
+        #        if ni == EOS_token:
+        #            decoded_words.append('<eos>')
+        #            break
+        #        else:
+        #            decoded_words.append(id2word[ni])
+        #
+        #    decoder_input = Variable(torch.LongTensor([[ni]]))
+        #    decoder_input = decoder_input.cuda() if use_cuda else decoder_input
 
-            decoder_input = Variable(torch.LongTensor([[ni]]))
-            decoder_input = decoder_input.cuda() if use_cuda else decoder_input
-
-    return decoded_words, decoder_attentions[:di + 1]
+    return decoded_words#, decoder_attentions[:di + 1]
 
 def evaluateRandomly(encoder, decoder, context, n=10):
     for i in range(n):
         group = random.choice(groups)
         for gr in group:
             print('>', gr)
-        output_words, attentions = evaluate(encoder, decoder, context, group[:-1])
+        output_words = evaluate(encoder, decoder, context, group[:-1])
         output_sentence = ' '.join(output_words)
         print('<', output_sentence)
         print('')
@@ -386,10 +426,22 @@ if __name__=='__main__':
     EOS_token = word2id['</s>']
     SOS_token = word2id['</d>']
     hidden_size = 300
+    # calculate max sentence length
+    max_len = 0
+    for gr in groups:
+        ws = [p.split(' ') for p in gr]
+        ws = max([len(p) for p in ws])
+        if ws > max_len:
+            max_len = ws
+    print max_len
     print len(word2id.keys())
     encoder1 = EncoderRNN(len(word2id.keys()), hidden_size)
+    encoder1.load_state_dict(torch.load('encoder_4.model'))
     attn_decoder1 = AttnDecoderRNN(hidden_size, len(word2id.keys()),1, dropout_p=0.1)
+    attn_decoder1.load_state_dict(torch.load('decoder_4.model'))
     context1 = ContextRNN(hidden_size,len(word2id.keys()))
+    #context1.load_state_dict(torch.load('context_4.model'))
+    print "loaded models"
 
     if use_cuda:
         encoder1 = encoder1.cuda()
