@@ -188,13 +188,13 @@ class HRED_QA(object):
         context_model = ContextRNN(self.hidden_size,len(self.word2id.keys()))
 
         if self.encoder_file and type(self.encoder_file)==str and os.path.exists(self.encoder_file):
-            encoder_model.load_state_dict(torch.load(self.encoder_file))
+            encoder_model.load_state_dict(torch.load(self.encoder_file),map_location=lambda storage, loc: storage)
 
         if self.decoder_file and type(self.decoder_file)==str and os.path.exists(self.decoder_file):
-            decoder_model.load_state_dict(torch.load(self.decoder_file))
+            decoder_model.load_state_dict(torch.load(self.decoder_file),map_location=lambda storage, loc: storage)
 
         if self.context_file and type(self.context_file)==str and os.path.exists(self.context_file):
-            context_model.load_state_dict(torch.load(self.context_file))
+            context_model.load_state_dict(torch.load(self.context_file),map_location=lambda storage, loc: storage)
 
         if use_cuda:
             encoder_model = encoder_model.cuda()
